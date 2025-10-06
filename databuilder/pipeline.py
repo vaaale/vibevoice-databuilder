@@ -21,8 +21,12 @@ def _iter_audio_files(input_dir: Path) -> Iterable[Path]:
             yield path
 
 
-def segment_audio(input_dir: Path, segments_dir: Path, vad_sampling_rate: int = 16_000) -> List[Path]:
-    """Split incoming audio files into voice segments saved under ``segments_dir``."""
+def segment_audio(input_dir: Path, segments_dir: Path, vad_sampling_rate: int = 16_000, min_duration: float = 5.0) -> List[Path]:
+    """Split incoming audio files into voice segments saved under ``segments_dir``.
+
+    Segments under min_duration seconds are concatenated with following segments
+    until they reach at least min_duration seconds.
+    """
     segments_dir.mkdir(parents=True, exist_ok=True)
     model = load_silero_vad()
     created_segments: List[Path] = []
@@ -34,7 +38,35 @@ def segment_audio(input_dir: Path, segments_dir: Path, vad_sampling_rate: int = 
             continue
 
         audio_tensor, sample_rate = torchaudio.load(str(audio_path))
-        for idx, segment in enumerate(timestamps, start=1):
+
+        # Concatenate segments until they reach min_duration
+        merged_segments = []
+        current_group = []
+
+        for segment in timestamps:
+            current_group.append(segment)
+            # Calculate total duration of current group
+            group_start = current_group[0]["start"]
+            group_end = current_group[-1]["end"]
+            duration = (group_end - group_start) / vad_sampling_rate
+
+            # If we've reached min_duration, save this group and start a new one
+            if duration >= min_duration:
+                merged_segments.append({
+                    "start": group_start,
+                    "end": group_end
+                })
+                current_group = []
+
+        # Add any remaining segments
+        if current_group:
+            merged_segments.append({
+                "start": current_group[0]["start"],
+                "end": current_group[-1]["end"]
+            })
+
+        # Save merged segments
+        for idx, segment in enumerate(merged_segments, start=1):
             start = int(segment["start"] * sample_rate / vad_sampling_rate)
             end = int(segment["end"] * sample_rate / vad_sampling_rate)
             if end <= start:
