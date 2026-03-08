@@ -1,6 +1,7 @@
 """Core audio segmentation, transcription, and dataset utilities."""
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
 
@@ -445,31 +446,75 @@ def _merge_adjacent_speaker_segments(
     for seg in ordered:
         start_time = float(seg["start_time"])
         end_time = float(seg["end_time"])
-        speaker_id = _canonicalize_speaker_id(str(seg["speaker_id"]))
+        raw_speaker_id = str(seg["speaker_id"])
+        speaker_id = _canonicalize_speaker_id(raw_speaker_id)
         chunk_index = seg.get("chunk_index")
         if end_time <= start_time:
             continue
 
         if not merged:
-            merged.append({"start_time": start_time, "end_time": end_time, "speaker_id": speaker_id, "chunk_index": chunk_index})
+            merged.append(
+                {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "speaker_id": speaker_id,
+                    "chunk_index": chunk_index,
+                    "source_speaker_ids": [raw_speaker_id],
+                    "source_chunk_indices": [chunk_index] if chunk_index is not None else [],
+                }
+            )
             continue
 
         prev = merged[-1]
         if prev["speaker_id"] != speaker_id:
-            merged.append({"start_time": start_time, "end_time": end_time, "speaker_id": speaker_id, "chunk_index": chunk_index})
+            merged.append(
+                {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "speaker_id": speaker_id,
+                    "chunk_index": chunk_index,
+                    "source_speaker_ids": [raw_speaker_id],
+                    "source_chunk_indices": [chunk_index] if chunk_index is not None else [],
+                }
+            )
             continue
 
         gap = start_time - float(prev["end_time"])
         if gap > merge_gap:
-            merged.append({"start_time": start_time, "end_time": end_time, "speaker_id": speaker_id, "chunk_index": chunk_index})
+            merged.append(
+                {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "speaker_id": speaker_id,
+                    "chunk_index": chunk_index,
+                    "source_speaker_ids": [raw_speaker_id],
+                    "source_chunk_indices": [chunk_index] if chunk_index is not None else [],
+                }
+            )
             continue
 
         candidate_end = max(float(prev["end_time"]), end_time)
         if max_duration is not None and (candidate_end - float(prev["start_time"])) > float(max_duration):
-            merged.append({"start_time": start_time, "end_time": end_time, "speaker_id": speaker_id, "chunk_index": chunk_index})
+            merged.append(
+                {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "speaker_id": speaker_id,
+                    "chunk_index": chunk_index,
+                    "source_speaker_ids": [raw_speaker_id],
+                    "source_chunk_indices": [chunk_index] if chunk_index is not None else [],
+                }
+            )
             continue
 
         prev["end_time"] = candidate_end
+        previous_source_speaker_ids = list(prev.get("source_speaker_ids", []))
+        previous_source_speaker_ids.append(raw_speaker_id)
+        prev["source_speaker_ids"] = previous_source_speaker_ids
+        previous_source_chunk_indices = list(prev.get("source_chunk_indices", []))
+        if chunk_index is not None:
+            previous_source_chunk_indices.append(chunk_index)
+        prev["source_chunk_indices"] = previous_source_chunk_indices
         if prev.get("chunk_index") != chunk_index:
             prev["chunk_index"] = None
 
@@ -495,6 +540,8 @@ def _merge_adjacent_speaker_segments(
                             "end_time": chunk_end,
                             "speaker_id": seg["speaker_id"],
                             "chunk_index": seg.get("chunk_index"),
+                            "source_speaker_ids": list(seg.get("source_speaker_ids", [])),
+                            "source_chunk_indices": list(seg.get("source_chunk_indices", [])),
                         }
                     )
                 chunk_start = chunk_end
@@ -601,11 +648,66 @@ def _merge_transcribed_utterances(
             previous_indices = list(previous.get("source_utterance_indices", []))
             previous_indices.extend(current["source_utterance_indices"])
             previous["source_utterance_indices"] = previous_indices
+            previous_source_speaker_ids = list(previous.get("source_speaker_ids", []))
+            previous_source_speaker_ids.extend(list(current.get("source_speaker_ids", [])))
+            previous["source_speaker_ids"] = previous_source_speaker_ids
+            previous_source_chunk_indices = list(previous.get("source_chunk_indices", []))
+            previous_source_chunk_indices.extend(list(current.get("source_chunk_indices", [])))
+            previous["source_chunk_indices"] = previous_source_chunk_indices
             continue
 
         merged.append(current)
 
     return merged
+
+
+def _build_voice_prompt_candidates(
+    utterances: List[dict],
+    voice_prompt_paths_by_idx: Dict[int, Path],
+    *,
+    min_duration: float = 3.0,
+    max_duration: float = 15.0,
+) -> Dict[int, Dict[str, List[Path]]]:
+    prompt_candidates: Dict[int, Dict[str, List[Path]]] = {}
+
+    for utterance in utterances:
+        utterance_index = int(utterance["utterance_index"])
+        prompt_path = voice_prompt_paths_by_idx.get(utterance_index)
+        if prompt_path is None:
+            continue
+        duration = float(utterance["end_time"]) - float(utterance["start_time"])
+        if duration < min_duration or duration > max_duration:
+            continue
+        source_speaker_ids = {str(speaker_id) for speaker_id in utterance.get("source_speaker_ids", [])}
+        source_chunk_indices = {int(chunk_index) for chunk_index in utterance.get("source_chunk_indices", []) if chunk_index is not None}
+        if len(source_speaker_ids) != 1 or len(source_chunk_indices) != 1:
+            continue
+        chunk_index = next(iter(source_chunk_indices))
+        speaker_id = next(iter(source_speaker_ids))
+        prompt_candidates.setdefault(chunk_index, {}).setdefault(speaker_id, []).append(prompt_path)
+
+    return prompt_candidates
+
+
+def _select_voice_prompts_for_sample(
+    utterances: List[dict],
+    prompt_candidates: Dict[int, Dict[str, List[Path]]],
+) -> List[str] | None:
+    selected_prompts: List[str] = []
+
+    for utterance in utterances:
+        source_speaker_ids = {str(speaker_id) for speaker_id in utterance.get("source_speaker_ids", [])}
+        source_chunk_indices = {int(chunk_index) for chunk_index in utterance.get("source_chunk_indices", []) if chunk_index is not None}
+        if len(source_speaker_ids) != 1 or len(source_chunk_indices) != 1:
+            return None
+        chunk_index = next(iter(source_chunk_indices))
+        speaker_id = next(iter(source_speaker_ids))
+        speaker_prompt_candidates = prompt_candidates.get(chunk_index, {}).get(speaker_id)
+        if not speaker_prompt_candidates:
+            return None
+        selected_prompts.append(str(random.choice(speaker_prompt_candidates).resolve()))
+
+    return selected_prompts
 
 
 def _format_sample_text(*, utterances: List[dict], speaker_texts: Dict[int, str]) -> str:
@@ -750,7 +852,7 @@ def create_diarized_samples(
     chunk_size: float = _DEFAULT_DIARIZATION_CHUNK_SIZE,
     vad_model=None,
     diarization_state: Dict[str, object] | None = None,
-) -> Dict[Path, str]:
+) -> Dict[Path, Dict[str, object]]:
     _require_torch()
     samples_dir.mkdir(parents=True, exist_ok=True)
 
@@ -776,9 +878,13 @@ def create_diarized_samples(
         audio_tensor = audio_tensor.mean(dim=0, keepdim=True)
 
     utterance_paths: List[Path] = []
+    utterance_paths_by_idx: Dict[int, Path] = {}
+    voice_prompt_paths_by_idx: Dict[int, Path] = {}
     utterance_meta: List[dict] = []
     utterances_dir = work_dir / "utterances" / audio_path.stem
+    voice_prompts_dir = work_dir / "voice_prompts" / audio_path.stem
     utterances_dir.mkdir(parents=True, exist_ok=True)
+    voice_prompts_dir.mkdir(parents=True, exist_ok=True)
 
     for utt_idx, utt in enumerate(utterances):
         start = int(float(utt["start_time"]) * sample_rate)
@@ -791,12 +897,20 @@ def create_diarized_samples(
         utt_path = utterances_dir / f"{audio_path.stem}_utt_{utt_idx:05d}{_SPEAKER_DELIMITER}{utt['speaker_id']}.wav"
         torchaudio.save(str(utt_path), utt_tensor, out_sr)  # type: ignore[union-attr]
         utterance_paths.append(utt_path)
+        utterance_paths_by_idx[utt_idx] = utt_path
+        utterance_duration = float(utt["end_time"]) - float(utt["start_time"])
+        if 3.0 <= utterance_duration <= 15.0:
+            voice_prompt_path = voice_prompts_dir / f"{audio_path.stem}_prompt_{utt_idx:05d}{_SPEAKER_DELIMITER}{utt['speaker_id']}.wav"
+            torchaudio.save(str(voice_prompt_path), utt_tensor, out_sr)  # type: ignore[union-attr]
+            voice_prompt_paths_by_idx[utt_idx] = voice_prompt_path
         utterance_meta.append({
             "start_time": float(utt["start_time"]),
             "end_time": float(utt["end_time"]),
             "speaker_id": str(utt["speaker_id"]),
             "utterance_index": utt_idx,
             "chunk_index": utt.get("chunk_index"),
+            "source_speaker_ids": list(utt.get("source_speaker_ids", [])),
+            "source_chunk_indices": list(utt.get("source_chunk_indices", [])),
         })
 
     if not utterance_paths:
@@ -824,6 +938,7 @@ def create_diarized_samples(
         transcripts_by_utt_idx[utt_idx] = text
 
     utterance_meta = [u for u in utterance_meta if transcripts_by_utt_idx.get(int(u["utterance_index"]))]
+    voice_prompt_candidates = _build_voice_prompt_candidates(utterance_meta, voice_prompt_paths_by_idx)
     utterance_meta = _merge_transcribed_utterances(utterance_meta, transcripts_by_utt_idx)
     if not utterance_meta:
         return {}
@@ -836,7 +951,7 @@ def create_diarized_samples(
     if not packed:
         return {}
 
-    output: Dict[Path, str] = {}
+    output: Dict[Path, Dict[str, object]] = {}
     for sample_idx, sample_utts in enumerate(packed):
         sample_audio_chunks: List[torch.Tensor] = []
         speaker_texts: Dict[int, str] = {}
@@ -868,18 +983,34 @@ def create_diarized_samples(
         sample_text = _format_sample_text(utterances=sample_utts, speaker_texts=speaker_texts)
         if not sample_text:
             continue
-        output[sample_path] = sample_text
+        sample_start_time = min(float(utt["start_time"]) for utt in sample_utts)
+        sample_end_time = max(float(utt["end_time"]) for utt in sample_utts)
+        output[sample_path] = {
+            "text": sample_text,
+            "duration": max(0.0, sample_end_time - sample_start_time),
+        }
+        voice_prompts = _select_voice_prompts_for_sample(sample_utts, voice_prompt_candidates)
+        if voice_prompts is not None:
+            output[sample_path]["voice_prompts"] = voice_prompts
 
     return output
 
 
-def build_dataset(transcripts: Dict[Path, str], speaker_prefix: str = "Speaker 0: ") -> Dataset:
+def build_dataset(transcripts: Dict[Path, str | Dict[str, object]], speaker_prefix: str = "Speaker 0: ") -> Dataset:
     """Create a Hugging Face dataset where audio references local files."""
     if not transcripts:
-        return Dataset.from_dict({"audio": [], "text": []})
+        return Dataset.from_dict({"audio": [], "text": [], "duration": [], "voice_prompts": []})
 
     items = []
-    for path, text in sorted(transcripts.items(), key=lambda item: str(item[0])):
+    for path, value in sorted(transcripts.items(), key=lambda item: str(item[0])):
+        if isinstance(value, dict):
+            text = str(value.get("text", ""))
+            duration = value.get("duration")
+            voice_prompts = value.get("voice_prompts")
+        else:
+            text = value
+            duration = None
+            voice_prompts = None
         stripped = text.strip()
         speaker_id = _infer_speaker_id(path)
         if speaker_id is None:
@@ -889,7 +1020,7 @@ def build_dataset(transcripts: Dict[Path, str], speaker_prefix: str = "Speaker 0
                 formatted_text = f"{speaker_prefix}{stripped}".strip()
         else:
             formatted_text = f"{_format_speaker_prefix(speaker_id)}{stripped}".strip()
-        items.append({"audio": str(path), "text": formatted_text})
+        items.append({"audio": str(path), "text": formatted_text, "duration": duration, "voice_prompts": voice_prompts})
     dataset = Dataset.from_list(items)
     dataset = dataset.cast_column("audio", Audio())
     return dataset
@@ -928,7 +1059,7 @@ def run_pipeline(
     audio_files = list(_iter_audio_files(input_dir))
     diarized_samples_dir = work_dir / "samples"
     if enable_diarization:
-        diarized_transcripts: Dict[Path, str] = {}
+        diarized_transcripts: Dict[Path, Dict[str, object]] = {}
         for audio_path in tqdm(audio_files, desc="Diarize", unit="file"):
             diarized_transcripts.update(
                 create_diarized_samples(
@@ -960,7 +1091,8 @@ def run_pipeline(
 
     if transcripts:
         transcripts_dir.mkdir(parents=True, exist_ok=True)
-        for path, text in transcripts.items():
+        for path, value in transcripts.items():
+            text = value if isinstance(value, str) else str(value.get("text", ""))
             transcript_path = transcripts_dir / f"{path.stem}.txt"
             transcript_path.write_text(text + "\n", encoding="utf-8")
 
