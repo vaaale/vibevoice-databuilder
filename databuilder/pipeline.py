@@ -11,7 +11,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     torch = None  # type: ignore[assignment]
     torchaudio = None  # type: ignore[assignment]
-from datasets import Audio, Dataset
+from datasets import Audio, Dataset, Sequence as HFSequence
 try:
     from silero_vad import get_speech_timestamps, load_silero_vad, read_audio
 except ModuleNotFoundError:  # pragma: no cover
@@ -1010,7 +1010,11 @@ def build_dataset(transcripts: Dict[Path, str | Dict[str, object]], speaker_pref
         else:
             text = value
             duration = None
-            voice_prompts = None
+            voice_prompts = []
+        if isinstance(voice_prompts, list):
+            normalized_voice_prompts = [str(prompt_path) for prompt_path in voice_prompts]
+        else:
+            normalized_voice_prompts = []
         stripped = text.strip()
         speaker_id = _infer_speaker_id(path)
         if speaker_id is None:
@@ -1020,9 +1024,10 @@ def build_dataset(transcripts: Dict[Path, str | Dict[str, object]], speaker_pref
                 formatted_text = f"{speaker_prefix}{stripped}".strip()
         else:
             formatted_text = f"{_format_speaker_prefix(speaker_id)}{stripped}".strip()
-        items.append({"audio": str(path), "text": formatted_text, "duration": duration, "voice_prompts": voice_prompts})
+        items.append({"audio": str(path), "text": formatted_text, "duration": duration, "voice_prompts": normalized_voice_prompts})
     dataset = Dataset.from_list(items)
     dataset = dataset.cast_column("audio", Audio())
+    dataset = dataset.cast_column("voice_prompts", HFSequence(Audio()))
     return dataset
 
 

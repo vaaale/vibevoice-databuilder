@@ -105,7 +105,7 @@ def main(
     click.echo(f"Uploaded {len(dataset)} records to {repo_id}")
     click.echo(f"Total time: {time.perf_counter() - start:.2f} seconds")
 
-    # Print 4 random samples from dataset
-    debug_samples = [s["text"] for s in dataset.select(range(40))]
-    for sample in dataset.shuffle().select(range(4)):
-        click.echo(sample)
+    # # Print 4 random samples from dataset
+    # debug_samples = [s["text"] for s in dataset.select(range(40))]
+    # for sample in dataset.shuffle().select(range(4)):
+    #     click.echo(sample)
