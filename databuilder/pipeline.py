@@ -176,13 +176,6 @@ def _resample_waveform(audio_tensor: torch.Tensor, sample_rate: int, target_samp
     return audio_tensor, target_sample_rate
 
 
-def _infer_speaker_id(segment_path: Path) -> str | None:
-    stem = segment_path.stem
-    if _SPEAKER_DELIMITER not in stem:
-        return None
-    return stem.split(_SPEAKER_DELIMITER, 1)[1]
-
-
 def _format_speaker_prefix(speaker_id: str) -> str:
     normalized = speaker_id.strip()
     if not normalized:
@@ -792,53 +785,6 @@ def _pack_utterances_into_samples(
     return samples
 
 
-def create_speaker_segments(
-    *,
-    audio_path: Path,
-    segments_dir: Path,
-    work_dir: Path,
-    max_duration: float | None = None,
-    max_num_speakers: int | None = None,
-    chunk_size: float = _DEFAULT_DIARIZATION_CHUNK_SIZE,
-    vad_model=None,
-    diarization_state: Dict[str, object] | None = None,
-) -> List[Path]:
-    """Create per-speaker wav segments for a single audio file."""
-    _require_torch()
-    segments_dir.mkdir(parents=True, exist_ok=True)
-    diarization_segments = diarize_audio(
-        audio_path,
-        work_dir,
-        chunk_size=chunk_size,
-        vad_model=vad_model,
-        diarization_state=diarization_state,
-    )
-    if not diarization_segments:
-        return []
-
-    audio_tensor, sample_rate = torchaudio.load(str(audio_path))  # type: ignore[union-attr]
-    if audio_tensor.ndim != 2:
-        raise RuntimeError(f"Expected audio tensor with shape (channels, samples), got {tuple(audio_tensor.shape)}")
-    if audio_tensor.shape[0] > 1:
-        audio_tensor = audio_tensor.mean(dim=0, keepdim=True)
-    created: List[Path] = []
-    for idx, segment in enumerate(diarization_segments, start=1):
-        start = int(segment["start_time"] * sample_rate)
-        end = int(segment["end_time"] * sample_rate)
-        if end <= start:
-            continue
-        end = min(end, audio_tensor.shape[1])
-        if end <= start:
-            continue
-        speaker_id = segment["speaker_id"]
-        output_path = segments_dir / f"{audio_path.stem}_{idx:03d}{_SPEAKER_DELIMITER}{speaker_id}.wav"
-        seg_tensor = audio_tensor[:, start:end]
-        seg_tensor, out_sr = _resample_waveform(seg_tensor, sample_rate, _OUTPUT_SAMPLE_RATE)
-        torchaudio.save(str(output_path), seg_tensor, out_sr)  # type: ignore[union-attr]
-        created.append(output_path)
-    return created
-
-
 def create_diarized_samples(
     *,
     audio_path: Path,
@@ -1007,23 +953,23 @@ def build_dataset(transcripts: Dict[Path, str | Dict[str, object]], speaker_pref
             text = str(value.get("text", ""))
             duration = value.get("duration")
             voice_prompts = value.get("voice_prompts")
+            speaker_id = value.get("speaker_id")
         else:
             text = value
             duration = None
             voice_prompts = []
+            speaker_id = None
         if isinstance(voice_prompts, list):
             normalized_voice_prompts = [str(prompt_path) for prompt_path in voice_prompts]
         else:
             normalized_voice_prompts = []
         stripped = text.strip()
-        speaker_id = _infer_speaker_id(path)
-        if speaker_id is None:
-            if stripped.startswith("Speaker "):
-                formatted_text = stripped
-            else:
-                formatted_text = f"{speaker_prefix}{stripped}".strip()
-        else:
+        if stripped.startswith("Speaker "):
+            formatted_text = stripped
+        elif isinstance(speaker_id, str) and speaker_id.strip():
             formatted_text = f"{_format_speaker_prefix(speaker_id)}{stripped}".strip()
+        else:
+            formatted_text = f"{speaker_prefix}{stripped}".strip()
         items.append({"audio": str(path), "text": formatted_text, "duration": duration, "voice_prompts": normalized_voice_prompts})
     dataset = Dataset.from_list(items)
     dataset = dataset.cast_column("audio", Audio())
