@@ -17,8 +17,8 @@ dependencies = [
     "click",
     "huggingface_hub",
     "lavasr",
-    "resemble-enhance",
     "torchcodec>=0.10.0",
+    "resemble-enhance",
 ]
 
 [project.scripts]
@@ -30,4 +30,9 @@ build-backend = "hatchling.build"
 
 [tool.uv.sources]
 lavasr = { git = "https://github.com/ysharma3501/LavaSR.git" }
-resemble-enhance = { path = "resemble_enhance-0.1.0-py3-none-any.whl" }
+resemble-enhance = { workspace = true }
+
+[tool.uv.workspace]
+members = [
+    "resemble-enhance",
+]
