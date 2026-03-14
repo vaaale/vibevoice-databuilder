@@ -1,0 +1,33 @@
+[project]
+name = "databuilder"
+version = "0.1.0"
+description = "Lightweight speech dataset builder with Whisper and Silero VAD"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "transformers",
+    "tqdm",
+    "torchaudio",
+    "torch",
+    "soundfile",
+    "librosa",
+    "nemo_toolkit[asr]",
+    "datasets",
+    "silero-vad",
+    "click",
+    "huggingface_hub",
+    "lavasr",
+    "resemble-enhance",
+    "torchcodec>=0.10.0",
+]
+
+[project.scripts]
+databuilder = "databuilder.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+lavasr = { git = "https://github.com/ysharma3501/LavaSR.git" }
+resemble-enhance = { path = "resemble_enhance-0.1.0-py3-none-any.whl" }
