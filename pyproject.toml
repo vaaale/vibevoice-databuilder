@@ -19,6 +19,7 @@ dependencies = [
     "click",
     "huggingface_hub",
     "torchcodec>=0.10.0",
+    "resemble-enhance",
 ]
 
 [project.scripts]
@@ -32,3 +33,6 @@ build-backend = "hatchling.build"
 resemble-enhance = { workspace = true }
 
 [tool.uv.workspace]
+members = [
+    "resemble-enhance",
+]

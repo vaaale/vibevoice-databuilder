@@ -15,14 +15,14 @@ Usage: databuilder.sh <command> [args...]
 Docker wrapper for VibeVoice tools. Automatically mounts host paths into the container.
 
 Commands:
-  databuilder  INPUT_DIR REPO_ID [options]
+  databuilder  INPUT_DIR OUTPUT_DIR [options]
       Build a speech dataset. INPUT_DIR is mounted read-only at /app/input.
-      If REPO_ID is a local path it is mounted read-write at /app/output.
+      OUTPUT_DIR is mounted read-write at /app/output.
 
-  enhance batch INPUT_DIR [--output-dir DIR] [options]
+  enhance batch INPUT_DIR OUTPUT_DIR [options]
       Batch-enhance all audio files in INPUT_DIR.
 
-  enhance sweep INPUT_FILE [--output-dir DIR] [options]
+  enhance sweep INPUT_FILE OUTPUT_DIR [options]
       Parameter sweep on a single audio file.
 
 Environment:
@@ -76,7 +76,7 @@ is_local_path() {
 # ---------------------------------------------------------------------------
 
 declare -a VOLUMES=()
-declare -a DOCKER_EXTRA=("--ipc=host" "--ulimit" "stack=67108864" "-v" "$HOME/.cache/huggingface:/root/.cache/huggingface")
+declare -a DOCKER_EXTRA=("--ipc=host" "--ulimit" "stack=67108864" "-v" "${HOME}/.cache/huggingface:/root/.cache/huggingface")
 declare -a CONTAINER_ARGS=()
 
 add_volume() {
@@ -121,22 +121,17 @@ handle_databuilder() {
     done
 
     if [[ ${#positionals[@]} -lt 2 ]]; then
-        echo "Error: databuilder requires INPUT_DIR and REPO_ID" >&2
-        echo "Usage: databuilder.sh databuilder INPUT_DIR REPO_ID [options]" >&2
+        echo "Error: databuilder requires INPUT_DIR and OUTPUT_DIR" >&2
+        echo "Usage: databuilder.sh databuilder INPUT_DIR OUTPUT_DIR [options]" >&2
         exit 1
     fi
 
     local input_dir="${positionals[0]}"
-    local repo_id="${positionals[1]}"
+    local output_dir="${positionals[1]}"
 
     add_volume "$input_dir" "/app/input" "ro"
-
-    if is_local_path "$repo_id"; then
-        add_volume "$repo_id" "/app/output" "rw"
-        CONTAINER_ARGS+=("/app/input" "/app/output")
-    else
-        CONTAINER_ARGS+=("/app/input" "$repo_id")
-    fi
+    add_volume "$output_dir" "/app/output" "rw"
+    CONTAINER_ARGS+=("/app/input" "/app/output")
 }
 
 handle_enhance() {
@@ -174,25 +169,29 @@ handle_enhance() {
 
     case "$subcmd" in
         batch)
-            if [[ ${#positionals[@]} -lt 1 ]]; then
-                echo "Error: enhance batch requires INPUT_DIR" >&2
+            if [[ ${#positionals[@]} -lt 2 ]]; then
+                echo "Error: enhance batch requires INPUT_DIR OUTPUT_DIR" >&2
                 exit 1
             fi
             add_volume "${positionals[0]}" "/app/input" "ro"
-            CONTAINER_ARGS+=("/app/input")
+            add_volume "${positionals[1]}" "/app/output" "rw"
+            CONTAINER_ARGS+=("/app/input" "--output-dir" "/app/output")
             ;;
         sweep)
-            if [[ ${#positionals[@]} -lt 1 ]]; then
-                echo "Error: enhance sweep requires INPUT_FILE" >&2
+            if [[ ${#positionals[@]} -lt 2 ]]; then
+                echo "Error: enhance sweep requires INPUT_FILE OUTPUT_DIR" >&2
                 exit 1
             fi
             local input_file="${positionals[0]}"
+            local resolved
+            resolved="$(resolve_path "$input_file")"
             local host_dir
-            host_dir="$(dirname "$(resolve_path "$input_file")")"
+            host_dir="$(dirname "$resolved")"
             local filename
-            filename="$(basename "$input_file")"
-            VOLUMES+=("-v" "${host_dir}:/app/input:ro")
-            CONTAINER_ARGS+=("/app/input/${filename}")
+            filename="$(basename "$resolved")"
+            add_volume "$host_dir" "/app/input" "ro"
+            add_volume "${positionals[1]}" "/app/output" "rw"
+            CONTAINER_ARGS+=("/app/input/${filename}" "--output-dir" "/app/output")
             ;;
         *)
             echo "Error: Unknown enhance subcommand '$subcmd'" >&2
@@ -233,5 +232,5 @@ esac
 
 CMD=(docker run --rm "${DOCKER_EXTRA[@]}" "${VOLUMES[@]}" "$IMAGE" "$COMMAND" "${CONTAINER_ARGS[@]}")
 
-echo ">>> ${CMD[*]}"
+printf '>>> %s\n' "$(printf '%q ' "${CMD[@]}")"
 exec "${CMD[@]}"
