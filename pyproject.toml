@@ -5,10 +5,12 @@ description = "Lightweight speech dataset builder with Whisper and Silero VAD"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "numpy==1.26.4",
+    "datasets>=2.20.0",
+    "torch==2.6.0",
     "transformers",
     "tqdm",
     "torchaudio",
-    "torch",
     "soundfile",
     "librosa",
     "nemo_toolkit[asr]",
@@ -16,9 +18,7 @@ dependencies = [
     "silero-vad",
     "click",
     "huggingface_hub",
-    "lavasr",
     "torchcodec>=0.10.0",
-    "resemble-enhance",
 ]
 
 [project.scripts]
@@ -29,10 +29,6 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv.sources]
-lavasr = { git = "https://github.com/ysharma3501/LavaSR.git" }
 resemble-enhance = { workspace = true }
 
 [tool.uv.workspace]
-members = [
-    "resemble-enhance",
-]

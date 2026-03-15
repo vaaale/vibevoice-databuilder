@@ -304,6 +304,7 @@ def diarize_audio(
     _require_torch()
     try:
         from nemo.collections.asr.parts.mixins.diarization import DiarizeConfig
+        from nemo.collections.asr.parts.utils.vad_utils import load_postprocessing_from_yaml
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(
             "NeMo diarization dependencies are not available. "
@@ -355,7 +356,8 @@ def diarize_audio(
         batch_size=1,
         num_workers=0,
         verbose=False,
-        max_num_of_spks=4,
+        postprocessing_params=load_postprocessing_from_yaml(None),
+        # max_num_of_spks=4,
     )
 
     def run_sortformer_diarization(chunk_audio_path: Path) -> List[str]:
