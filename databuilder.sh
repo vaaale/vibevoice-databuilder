@@ -155,8 +155,8 @@ handle_enhance() {
         if is_valued_opt "$arg" && [[ $((i + 1)) -lt ${#args[@]} ]]; then
             local val="${args[$((i + 1))]}"
             if [[ "$arg" == "--output-dir" ]]; then
-                add_volume "$val" "/app/output" "rw"
-                CONTAINER_ARGS+=("$arg" "/app/output")
+                add_volume "$val" "$val" "rw"
+                CONTAINER_ARGS+=("$arg" "$val")
             else
                 CONTAINER_ARGS+=("$arg" "$val")
             fi
@@ -176,9 +176,9 @@ handle_enhance() {
                 echo "Error: enhance batch requires INPUT_DIR OUTPUT_DIR" >&2
                 exit 1
             fi
-            add_volume "${positionals[0]}" "/app/input" "ro"
-            add_volume "${positionals[1]}" "/app/output" "rw"
-            CONTAINER_ARGS+=("/app/input" "--output-dir" "/app/output")
+            add_volume "${positionals[0]}" "${positionals[0]}" "ro"
+            add_volume "${positionals[1]}" "${positionals[1]}" "rw"
+            CONTAINER_ARGS+=("${positionals[0]}" "--output-dir" "${positionals[1]}")
             ;;
         sweep)
             if [[ ${#positionals[@]} -lt 2 ]]; then
@@ -192,9 +192,9 @@ handle_enhance() {
             host_dir="$(dirname "$resolved")"
             local filename
             filename="$(basename "$resolved")"
-            add_volume "$host_dir" "/app/input" "ro"
-            add_volume "${positionals[1]}" "/app/output" "rw"
-            CONTAINER_ARGS+=("/app/input/${filename}" "--output-dir" "/app/output")
+            add_volume "$host_dir" "$host_dir" "ro"
+            add_volume "${positionals[1]}" "${positionals[1]}" "rw"
+            CONTAINER_ARGS+=("$host_dir/${filename}" "--output-dir" "${positionals[1]}")
             ;;
         *)
             echo "Error: Unknown enhance subcommand '$subcmd'" >&2

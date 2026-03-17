@@ -80,11 +80,14 @@ def main(
 ) -> None:
     """Segment speech, run Whisper ASR, and push a dataset to the HF Hub."""
     start = time.perf_counter()
-    resolved_work_dir = (work_dir or Path.cwd() / "output").expanduser().resolve()
-    input_dir = input_dir.expanduser().resolve()
 
     if repo_id.startswith("/") or repo_id.startswith("./") or Path(repo_id).exists():
         repo_id = Path(repo_id).resolve()
+        resolved_work_dir = repo_id
+    else:
+        resolved_work_dir = (work_dir or Path.cwd() / "output").expanduser().resolve()
+
+    input_dir = input_dir.expanduser().resolve()
 
     if not input_dir.exists():  # Defensive: Click already checks, but keep for clarity
         raise click.UsageError(f"Input directory not found: {input_dir}")
