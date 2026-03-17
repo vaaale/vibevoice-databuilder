@@ -1,6 +1,7 @@
 """Core audio segmentation, transcription, and dataset utilities."""
 from __future__ import annotations
 
+import json
 import random
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
@@ -973,14 +974,21 @@ def build_dataset(transcripts: Dict[Path, str | Dict[str, object]], speaker_pref
         else:
             formatted_text = f"{speaker_prefix}{stripped}".strip()
         items.append({"audio": str(path), "text": formatted_text, "duration": duration, "voice_prompts": normalized_voice_prompts})
+
     dataset = Dataset.from_list(items)
     dataset = dataset.cast_column("audio", Audio())
     dataset = dataset.cast_column("voice_prompts", HFSequence(Audio()))
-    return dataset
+    return dataset, items
 
 
-def push_dataset(dataset: Dataset, repo_id: str | Path, token: str | None = None) -> None:
+def push_dataset(dataset: Dataset, items: List[Dict[str, object]], repo_id: str | Path, token: str | None = None) -> None:
     """Upload dataset to the specified Hugging Face Hub repo."""
+    # Save items to jsonl
+    items_path = Path(repo_id) / "vibevoice_dataset.jsonl"
+    with items_path.open("w") as f:
+        for item in items:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
     if isinstance(repo_id, Path):
         dataset.save_to_disk(dataset_path=repo_id)
     else:
@@ -1049,6 +1057,7 @@ def run_pipeline(
             transcript_path = transcripts_dir / f"{path.stem}.txt"
             transcript_path.write_text(text + "\n", encoding="utf-8")
 
-    dataset = build_dataset(transcripts, speaker_prefix=speaker_prefix)
-    push_dataset(dataset, repo_id, token=token)
+    dataset, items = build_dataset(transcripts, speaker_prefix=speaker_prefix)
+    push_dataset(dataset, items, repo_id, token=token)
+
     return dataset

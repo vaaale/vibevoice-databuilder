@@ -129,9 +129,12 @@ handle_databuilder() {
     local input_dir="${positionals[0]}"
     local output_dir="${positionals[1]}"
 
-    add_volume "$input_dir" "/app/input" "ro"
-    add_volume "$output_dir" "/app/output" "rw"
-    CONTAINER_ARGS+=("/app/input" "/app/output")
+#    add_volume "$input_dir" "/app/input" "ro"
+#    add_volume "$output_dir" "/app/output" "rw"
+#    CONTAINER_ARGS+=("/app/input" "/app/output")
+    add_volume "$input_dir" "$input_dir" "ro"
+    add_volume "$output_dir" "$output_dir" "rw"
+    CONTAINER_ARGS+=("$input_dir" "$output_dir")
 }
 
 handle_enhance() {
