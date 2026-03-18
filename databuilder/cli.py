@@ -1,6 +1,7 @@
 """Console entry point powered by Click."""
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 from typing import Optional
@@ -64,6 +65,20 @@ from .pipeline import run_pipeline
     show_default=True,
     help="Maximum duration in seconds for VAD-built diarization chunks.",
 )
+@click.option(
+    "--uid",
+    type=int,
+    default=1000,
+    show_default=True,
+    help="UID to set on output files after generation.",
+)
+@click.option(
+    "--gid",
+    type=int,
+    default=1000,
+    show_default=True,
+    help="GID to set on output files after generation.",
+)
 
 def main(
     input_dir: Path,
@@ -77,6 +92,8 @@ def main(
     max_num_speakers: Optional[int],
     batch_size: int,
     chunk_size: float,
+    uid: int,
+    gid: int,
 ) -> None:
     """Segment speech, run Whisper ASR, and push a dataset to the HF Hub."""
     start = time.perf_counter()
@@ -107,6 +124,12 @@ def main(
     )
     click.echo(f"Uploaded {len(dataset)} records to {repo_id}")
     click.echo(f"Total time: {time.perf_counter() - start:.2f} seconds")
+
+    click.echo(f"Setting ownership of {resolved_work_dir} to {uid}:{gid}")
+    subprocess.run(
+        ["chown", "-R", f"{uid}:{gid}", str(resolved_work_dir)],
+        check=True,
+    )
 
     # # Print 4 random samples from dataset
     # debug_samples = [s["text"] for s in dataset.select(range(40))]

@@ -55,7 +55,7 @@ resolve_path() {
 VALUED_OPTS=(
     --model-id --device --hf-token --speaker-prefix --max-duration
     --max-num-speakers --batch-size --chunk-size --work-dir --output-dir
-    --nfe --lambd --tau
+    --nfe --lambd --tau --uid --gid
 )
 
 is_valued_opt() {
@@ -135,6 +135,9 @@ handle_databuilder() {
     add_volume "$input_dir" "$input_dir" "ro"
     add_volume "$output_dir" "$output_dir" "rw"
     CONTAINER_ARGS+=("$input_dir" "$output_dir")
+
+    # Pass current user's uid/gid so the container can chown output files
+    CONTAINER_ARGS+=("--uid" "$(id -u)" "--gid" "$(id -g)")
 }
 
 handle_enhance() {
