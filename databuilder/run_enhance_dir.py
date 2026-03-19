@@ -5,7 +5,7 @@ import sys
 import time
 import warnings
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 import torch
 import torchaudio
@@ -13,9 +13,7 @@ import torchaudio.transforms as T
 
 from resemble_enhance.enhancer.inference import (
     denoise,
-    denoise_batch,
     enhance,
-    enhance_batch,
 )
 
 logging.basicConfig(
@@ -42,41 +40,6 @@ def collect_audio_files(directory: Path) -> list[Path]:
     return files
 
 
-def load_audio_files(audio_files: List[Path]) -> Tuple[List[torch.Tensor], List[int]]:
-    dwavs = []
-    srs = []
-    for audio_file in audio_files:
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning)
-            dwav, sr = torchaudio.load(audio_file)
-        dwavs.append(dwav.mean(dim=0))
-        srs.append(sr)
-    return dwavs, srs
-
-
-def save_audio_files(
-    audio_files: List[Path],
-    dwavs: List[torch.Tensor],
-    srs: List[int],
-    original_srs: List[int],
-    output_dir: Path,
-    resample: bool = False,
-) -> List[Path]:
-    output_files = []
-    for audio_file, wav, new_sr, orig_sr in zip(audio_files, dwavs, srs, original_srs):
-        output_file = output_dir / audio_file.name
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=UserWarning)
-            if resample:
-                resampler = T.Resample(new_sr, orig_sr, dtype=wav.dtype)
-                wav = resampler(wav)
-                torchaudio.save(output_file, wav.unsqueeze(0), sample_rate=orig_sr)
-            else:
-                torchaudio.save(output_file, wav.unsqueeze(0), sample_rate=new_sr)
-        output_files.append(output_file)
-    return output_files
-
-
 def parse_float_list(value: str) -> List[float]:
     return [float(x.strip()) for x in value.split(",")]
 
@@ -97,59 +60,78 @@ def run_batch(
     batch_size: int,
     resample: bool,
 ):
-    # Measure total audio duration
     total_audio_duration = 0.0
-    for f in audio_files:
-        total_audio_duration += get_audio_duration(f)
+    t_load_total = 0.0
+    t_denoise_total = 0.0
+    t_enhance_total = 0.0
+    t_save_total = 0.0
+    output_files: List[Path] = []
+    n_files = len(audio_files)
 
-    # Load
-    t_load_start = time.perf_counter()
-    dwavs, srs = load_audio_files(audio_files)
-    original_srs = list(srs)
-    t_load_elapsed = time.perf_counter() - t_load_start
-    logger.info(f"Audio loading: {t_load_elapsed:.3f}s")
+    for file_idx, audio_file in enumerate(audio_files, 1):
+        logger.info(f"[{file_idx}/{n_files}] Processing {audio_file.name}")
+        try:
+            file_duration = get_audio_duration(audio_file)
+            total_audio_duration += file_duration
 
-    # Denoise
-    t_denoise_elapsed = 0.0
-    if do_denoise:
-        t_denoise_start = time.perf_counter()
-        results = denoise_batch(
-            dwavs, srs, device, run_dir="resemble_ai", batch_size=batch_size,
-        )
-        dwavs = [r[0] for r in results]
-        srs = [r[1] for r in results]
-        t_denoise_elapsed = time.perf_counter() - t_denoise_start
-        logger.info(f"Denoising: {t_denoise_elapsed:.2f}s")
+            # Load single file
+            t0 = time.perf_counter()
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning)
+                dwav, sr = torchaudio.load(audio_file)
+            dwav = dwav.mean(dim=0)
+            original_sr = sr
+            t_load_total += time.perf_counter() - t0
 
-    # Enhance
-    t_enhance_elapsed = 0.0
-    if do_enhance:
-        t_enhance_start = time.perf_counter()
-        results = enhance_batch(
-            dwavs, srs, device,
-            nfe=nfe, solver="midpoint", lambd=lambd, tau=tau,
-            batch_size=batch_size,
-        )
-        dwavs = [r[0] for r in results]
-        srs = [r[1] for r in results]
-        t_enhance_elapsed = time.perf_counter() - t_enhance_start
-        logger.info(f"Enhancement: {t_enhance_elapsed:.2f}s")
+            # Denoise
+            if do_denoise:
+                t0 = time.perf_counter()
+                dwav, sr = denoise(dwav, sr, device, run_dir="resemble_ai")
+                t_denoise_total += time.perf_counter() - t0
 
-    # Save
-    t_save_start = time.perf_counter()
-    output_files = save_audio_files(
-        audio_files, dwavs, srs, original_srs, output_dir, resample=resample,
-    )
-    t_save_elapsed = time.perf_counter() - t_save_start
-    logger.info(f"Saving: {t_save_elapsed:.3f}s")
+            # Enhance
+            if do_enhance:
+                t0 = time.perf_counter()
+                dwav, sr = enhance(
+                    dwav, sr, device,
+                    nfe=nfe, solver="midpoint", lambd=lambd, tau=tau,
+                )
+                t_enhance_total += time.perf_counter() - t0
 
-    t_total = t_load_elapsed + t_denoise_elapsed + t_enhance_elapsed + t_save_elapsed
+            # Save
+            t0 = time.perf_counter()
+            output_file = output_dir / audio_file.name
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning)
+                if resample:
+                    resampler = T.Resample(sr, original_sr, dtype=dwav.dtype)
+                    dwav = resampler(dwav)
+                    torchaudio.save(output_file, dwav.unsqueeze(0), sample_rate=original_sr)
+                else:
+                    torchaudio.save(output_file, dwav.unsqueeze(0), sample_rate=sr)
+            output_files.append(output_file)
+            t_save_total += time.perf_counter() - t0
+
+            logger.info(
+                f"[{file_idx}/{n_files}] Done {audio_file.name} "
+                f"({file_duration:.1f}s audio) -> {output_file.name}"
+            )
+
+        except Exception:
+            logger.exception(f"[{file_idx}/{n_files}] Failed to process {audio_file.name}")
+            continue
+        finally:
+            # Free memory between files
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    t_total = t_load_total + t_denoise_total + t_enhance_total + t_save_total
 
     return {
-        "t_load": t_load_elapsed,
-        "t_denoise": t_denoise_elapsed,
-        "t_enhance": t_enhance_elapsed,
-        "t_save": t_save_elapsed,
+        "t_load": t_load_total,
+        "t_denoise": t_denoise_total,
+        "t_enhance": t_enhance_total,
+        "t_save": t_save_total,
         "t_total": t_total,
         "audio_duration": total_audio_duration,
         "n_files": len(output_files),
@@ -327,23 +309,28 @@ def main():
             total_audio_duration += get_audio_duration(f)
         logger.info(f"Total audio duration: {total_audio_duration:.1f}s")
 
-        stats = run_batch(
-            audio_files=audio_files,
-            output_dir=output_dir,
-            do_denoise=do_denoise,
-            do_enhance=do_enhance,
-            nfe=args.nfe,
-            lambd=args.lambd,
-            tau=args.tau,
-            device=device,
-            batch_size=args.batch_size,
-            resample=args.resample,
-        )
+        try:
+            stats = run_batch(
+                audio_files=audio_files,
+                output_dir=output_dir,
+                do_denoise=do_denoise,
+                do_enhance=do_enhance,
+                nfe=args.nfe,
+                lambd=args.lambd,
+                tau=args.tau,
+                device=device,
+                batch_size=args.batch_size,
+                resample=args.resample,
+            )
+        except Exception:
+            logger.exception("Batch processing failed")
+            sys.exit(1)
 
         n_files = stats["n_files"]
         t_total = stats["t_total"]
+        audio_duration = stats["audio_duration"]
         avg_per_file = t_total / n_files if n_files > 0 else 0
-        rtf = t_total / total_audio_duration if total_audio_duration > 0 else float("inf")
+        rtf = t_total / audio_duration if audio_duration > 0 else float("inf")
 
         logger.info(f"Processed {n_files} files -> {output_dir}")
 
@@ -356,7 +343,7 @@ def main():
         logger.info(f"  Saving:            {stats['t_save']:.3f}s")
         logger.info(f"  Total:             {t_total:.2f}s")
         logger.info(f"  Avg per file:      {avg_per_file:.2f}s")
-        logger.info(f"  Audio duration:    {total_audio_duration:.1f}s")
+        logger.info(f"  Audio duration:    {audio_duration:.1f}s")
         logger.info(f"  Real-time factor:  {rtf:.3f}x (lower is faster)")
 
     elif args.command == "sweep":
