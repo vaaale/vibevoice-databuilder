@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
 
@@ -684,9 +685,68 @@ def _ends_with_sentence_punctuation(text: str) -> bool:
     return text.rstrip().endswith(_SENTENCE_END_PUNCTUATION)
 
 
+def _split_utterance_on_sentences(
+    utterance: dict,
+    max_duration: float,
+) -> List[dict]:
+    """Split an over-long utterance at sentence boundaries so each piece ≤ max_duration."""
+    text = str(utterance.get("text", ""))
+    start = float(utterance["start_time"])
+    end = float(utterance["end_time"])
+    total_dur = end - start
+    if total_dur <= max_duration or not text:
+        return [utterance]
+
+    escaped = "".join(re.escape(p) for p in _SENTENCE_END_PUNCTUATION)
+    sentence_pattern = re.compile(rf'(?<=[{escaped}])\s+')
+    sentences = sentence_pattern.split(text)
+    if len(sentences) <= 1:
+        return [utterance]
+
+    total_chars = sum(len(s) for s in sentences)
+    if total_chars == 0:
+        return [utterance]
+
+    results: List[dict] = []
+    chunk_sentences: List[str] = []
+    chunk_char_count = 0
+    chunk_start = start
+
+    for sentence in sentences:
+        sentence_chars = len(sentence)
+
+        if chunk_sentences:
+            projected_end = chunk_start + ((chunk_char_count + sentence_chars) / total_chars) * total_dur
+            projected_dur = projected_end - chunk_start
+            if projected_dur > max_duration:
+                chunk_end = chunk_start + (chunk_char_count / total_chars) * total_dur
+                piece = dict(utterance)
+                piece["start_time"] = chunk_start
+                piece["end_time"] = chunk_end
+                piece["text"] = " ".join(chunk_sentences)
+                results.append(piece)
+                chunk_start = chunk_end
+                chunk_sentences = []
+                chunk_char_count = 0
+
+        chunk_sentences.append(sentence)
+        chunk_char_count += sentence_chars
+
+    if chunk_sentences:
+        piece = dict(utterance)
+        piece["start_time"] = chunk_start
+        piece["end_time"] = end
+        piece["text"] = " ".join(chunk_sentences)
+        results.append(piece)
+
+    return results if results else [utterance]
+
+
 def _merge_transcribed_utterances(
     utterances: List[dict],
     transcripts_by_utt_idx: Dict[int, str],
+    *,
+    max_duration: float | None = None,
 ) -> List[dict]:
     merged: List[dict] = []
 
@@ -707,7 +767,11 @@ def _merge_transcribed_utterances(
         previous = merged[-1]
         same_speaker = _canonicalize_speaker_id(str(previous["speaker_id"])) == _canonicalize_speaker_id(str(current["speaker_id"]))
 
-        if same_speaker and not _ends_with_sentence_punctuation(str(previous.get("text", ""))):
+        prev_dur = float(previous["end_time"]) - float(previous["start_time"])
+        cur_dur = float(current["end_time"]) - float(current["start_time"])
+        would_exceed = max_duration is not None and (prev_dur + cur_dur) > float(max_duration)
+
+        if same_speaker and not would_exceed and not _ends_with_sentence_punctuation(str(previous.get("text", ""))):
             previous["end_time"] = max(float(previous["end_time"]), float(current["end_time"]))
             previous["text"] = f"{str(previous.get('text', '')).rstrip()} {text}".strip()
             previous_indices = list(previous.get("source_utterance_indices", []))
@@ -722,6 +786,12 @@ def _merge_transcribed_utterances(
             continue
 
         merged.append(current)
+
+    if max_duration is not None:
+        split_merged: List[dict] = []
+        for utt in merged:
+            split_merged.extend(_split_utterance_on_sentences(utt, float(max_duration)))
+        merged = split_merged
 
     return merged
 
@@ -964,9 +1034,28 @@ def create_diarized_samples(
 
     utterance_meta = [u for u in utterance_meta if transcripts_by_utt_idx.get(int(u["utterance_index"]))]
     voice_prompt_candidates = _build_voice_prompt_candidates(utterance_meta, voice_prompt_paths_by_idx)
-    utterance_meta = _merge_transcribed_utterances(utterance_meta, transcripts_by_utt_idx)
+    utterance_meta = _merge_transcribed_utterances(utterance_meta, transcripts_by_utt_idx, max_duration=max_duration)
     if not utterance_meta:
         return {}
+
+    merged_utterances_dir = work_dir / "merged_utterances" / audio_path.stem
+    merged_utterances_dir.mkdir(parents=True, exist_ok=True)
+    for meta_idx, utt in enumerate(utterance_meta):
+        start_sample = int(float(utt["start_time"]) * sample_rate)
+        end_sample = int(float(utt["end_time"]) * sample_rate)
+        end_sample = min(end_sample, audio_tensor.shape[1])
+        if end_sample <= start_sample:
+            continue
+        utt_tensor = audio_tensor[:, start_sample:end_sample]
+        utt_tensor, out_sr = _resample_waveform(utt_tensor, sample_rate, _OUTPUT_SAMPLE_RATE)
+        utt_tensor, trim_start, trim_end = _trim_silence(utt_tensor, out_sr)
+        trim_start_sec = trim_start / out_sr
+        trim_end_sec = trim_end / out_sr
+        utt["start_time"] = float(utt["start_time"]) + trim_start_sec
+        utt["end_time"] = float(utt["end_time"]) - trim_end_sec
+        wav_path = merged_utterances_dir / f"{audio_path.stem}_merged_{meta_idx:05d}.wav"
+        torchaudio.save(str(wav_path), utt_tensor, out_sr)  # type: ignore[union-attr]
+        utt["_wav_path"] = wav_path
 
     packed = _pack_utterances_into_samples(
         utterance_meta,
@@ -984,19 +1073,29 @@ def create_diarized_samples(
             utt_i = int(utt["utterance_index"])
             speaker_texts[utt_i] = str(utt.get("text", "")).strip() or transcripts_by_utt_idx.get(utt_i, "")
 
-            source_utterance_indices = utt.get("source_utterance_indices") or [utt_i]
-            for source_utt_i in source_utterance_indices:
-                utt_path = utterances_dir / f"{audio_path.stem}_utt_{int(source_utt_i):05d}{_SPEAKER_DELIMITER}{utt['speaker_id']}.wav"
-                if not utt_path.exists():
-                    continue
-                chunk, chunk_sr = torchaudio.load(str(utt_path))  # type: ignore[union-attr]
-                if chunk.ndim != 2:
-                    continue
-                if chunk_sr != _OUTPUT_SAMPLE_RATE:
-                    chunk, _ = _resample_waveform(chunk, chunk_sr, _OUTPUT_SAMPLE_RATE)
-                if chunk.shape[0] > 1:
-                    chunk = chunk.mean(dim=0, keepdim=True)
-                sample_audio_chunks.append(chunk)
+            wav_path = utt.get("_wav_path")
+            if wav_path is not None and Path(str(wav_path)).exists():
+                chunk, chunk_sr = torchaudio.load(str(wav_path))  # type: ignore[union-attr]
+                if chunk.ndim == 2:
+                    if chunk_sr != _OUTPUT_SAMPLE_RATE:
+                        chunk, _ = _resample_waveform(chunk, chunk_sr, _OUTPUT_SAMPLE_RATE)
+                    if chunk.shape[0] > 1:
+                        chunk = chunk.mean(dim=0, keepdim=True)
+                    sample_audio_chunks.append(chunk)
+            else:
+                source_utterance_indices = utt.get("source_utterance_indices") or [utt_i]
+                for source_utt_i in source_utterance_indices:
+                    utt_path = utterances_dir / f"{audio_path.stem}_utt_{int(source_utt_i):05d}{_SPEAKER_DELIMITER}{utt['speaker_id']}.wav"
+                    if not utt_path.exists():
+                        continue
+                    chunk, chunk_sr = torchaudio.load(str(utt_path))  # type: ignore[union-attr]
+                    if chunk.ndim != 2:
+                        continue
+                    if chunk_sr != _OUTPUT_SAMPLE_RATE:
+                        chunk, _ = _resample_waveform(chunk, chunk_sr, _OUTPUT_SAMPLE_RATE)
+                    if chunk.shape[0] > 1:
+                        chunk = chunk.mean(dim=0, keepdim=True)
+                    sample_audio_chunks.append(chunk)
 
         if not sample_audio_chunks:
             continue
