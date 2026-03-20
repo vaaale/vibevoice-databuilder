@@ -32,6 +32,75 @@ _OUTPUT_SAMPLE_RATE = 24_000
 _DEFAULT_DIARIZATION_CHUNK_SIZE = 30.0
 _SORTFORMER_SESSION_LEN_SEC = 90.0
 _SENTENCE_END_PUNCTUATION = (".", "?", "!")
+_SILENCE_PADDING_SEC = 0.8
+
+
+def _trim_silence(
+    waveform: torch.Tensor,
+    sample_rate: int,
+    *,
+    padding_sec: float = _SILENCE_PADDING_SEC,
+    frame_length_ms: float = 20.0,
+    threshold_db: float = -40.0,
+) -> tuple[torch.Tensor, int, int]:
+    """Trim leading/trailing silence from a waveform, keeping *padding_sec* of silence.
+
+    Args:
+        waveform: (channels, samples) tensor.
+        sample_rate: sample rate of the waveform.
+        padding_sec: seconds of silence to preserve at each end.
+        frame_length_ms: analysis frame length in milliseconds.
+        threshold_db: frames below this dB level (relative to peak) are silence.
+
+    Returns:
+        (trimmed_waveform, trimmed_start_samples, trimmed_end_samples)
+        where the two ints are how many samples were removed from each end.
+    """
+    if waveform.shape[1] == 0:
+        return waveform, 0, 0
+
+    mono = waveform.mean(dim=0)  # (samples,)
+    frame_length = max(1, int(sample_rate * frame_length_ms / 1000.0))
+    hop = frame_length
+
+    # Compute frame-level RMS energy
+    n_samples = mono.shape[0]
+    n_frames = max(1, n_samples // hop)
+    rms = torch.zeros(n_frames)
+    for i in range(n_frames):
+        start = i * hop
+        end = min(start + frame_length, n_samples)
+        frame = mono[start:end]
+        rms[i] = (frame ** 2).mean().sqrt()
+
+    peak_rms = rms.max()
+    if peak_rms < 1e-10:
+        return waveform, 0, 0
+
+    threshold_linear = peak_rms * (10.0 ** (threshold_db / 20.0))
+    active = rms >= threshold_linear
+
+    if not active.any():
+        return waveform, 0, 0
+
+    first_active = int(active.nonzero(as_tuple=True)[0][0].item())
+    last_active = int(active.nonzero(as_tuple=True)[0][-1].item())
+
+    speech_start_sample = first_active * hop
+    speech_end_sample = min((last_active + 1) * hop + frame_length, n_samples)
+
+    padding_samples = int(padding_sec * sample_rate)
+
+    trim_start = max(0, speech_start_sample - padding_samples)
+    trim_end = min(n_samples, speech_end_sample + padding_samples)
+
+    trimmed_start_samples = trim_start
+    trimmed_end_samples = n_samples - trim_end
+
+    if trimmed_start_samples == 0 and trimmed_end_samples == 0:
+        return waveform, 0, 0
+
+    return waveform[:, trim_start:trim_end], trimmed_start_samples, trimmed_end_samples
 
 
 def _require_torch() -> None:
@@ -843,18 +912,25 @@ def create_diarized_samples(
             continue
         utt_tensor = audio_tensor[:, start:end]
         utt_tensor, out_sr = _resample_waveform(utt_tensor, sample_rate, _OUTPUT_SAMPLE_RATE)
+        utt_tensor, trim_start_samples, trim_end_samples = _trim_silence(utt_tensor, out_sr)
+        trim_start_sec = trim_start_samples / out_sr
+        trim_end_sec = trim_end_samples / out_sr
+        adjusted_start_time = float(utt["start_time"]) + trim_start_sec
+        adjusted_end_time = float(utt["end_time"]) - trim_end_sec
+        if adjusted_end_time <= adjusted_start_time:
+            continue
         utt_path = utterances_dir / f"{audio_path.stem}_utt_{utt_idx:05d}{_SPEAKER_DELIMITER}{utt['speaker_id']}.wav"
         torchaudio.save(str(utt_path), utt_tensor, out_sr)  # type: ignore[union-attr]
         utterance_paths.append(utt_path)
         utterance_paths_by_idx[utt_idx] = utt_path
-        utterance_duration = float(utt["end_time"]) - float(utt["start_time"])
+        utterance_duration = adjusted_end_time - adjusted_start_time
         if 3.0 <= utterance_duration <= 15.0:
             voice_prompt_path = voice_prompts_dir / f"{audio_path.stem}_prompt_{utt_idx:05d}{_SPEAKER_DELIMITER}{utt['speaker_id']}.wav"
             torchaudio.save(str(voice_prompt_path), utt_tensor, out_sr)  # type: ignore[union-attr]
             voice_prompt_paths_by_idx[utt_idx] = voice_prompt_path
         utterance_meta.append({
-            "start_time": float(utt["start_time"]),
-            "end_time": float(utt["end_time"]),
+            "start_time": adjusted_start_time,
+            "end_time": adjusted_end_time,
             "speaker_id": str(utt["speaker_id"]),
             "utterance_index": utt_idx,
             "chunk_index": utt.get("chunk_index"),
