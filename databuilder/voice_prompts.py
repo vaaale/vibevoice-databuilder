@@ -5,8 +5,8 @@ import random
 from pathlib import Path
 from typing import Dict, List
 
-VOICE_PROMPT_MIN_DURATION = 3.0
-VOICE_PROMPT_MAX_DURATION = 15.0
+VOICE_PROMPT_MIN_DURATION = 10.0
+VOICE_PROMPT_MAX_DURATION = 25.0
 
 
 class SpeakerPromptCache:
