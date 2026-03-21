@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import click
-from datasets import Dataset, concatenate_datasets, load_dataset, load_from_disk
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 from tqdm.auto import tqdm
 
 
@@ -17,16 +17,34 @@ def _is_local_dataset(path_str: str) -> bool:
     return Path(path_str).is_dir()
 
 
-def _load_single(path_str: str) -> Dataset:
+def _dataset_dict_to_dataset(dd: DatasetDict) -> Dataset:
+    """Concatenate every split inside a *DatasetDict* into one Dataset."""
+    splits = list(dd.values())
+    if len(splits) == 1:
+        return splits[0]
+    return concatenate_datasets(splits)
+
+
+def _load_single(path_str: str, *, split: str | None = None) -> Dataset:
     if _is_local_dataset(path_str):
         click.echo(f"  Loading local dataset: {path_str}")
-        return load_from_disk(path_str)
+        result = load_from_disk(path_str)
+        if isinstance(result, DatasetDict):
+            if split is not None:
+                return result[split]
+            return _dataset_dict_to_dataset(result)
+        return result
     click.echo(f"  Loading HF dataset: {path_str}")
-    return load_dataset(path_str, split="train")
+    if split is not None:
+        return load_dataset(path_str, split=split)
+    result = load_dataset(path_str)
+    if isinstance(result, DatasetDict):
+        return _dataset_dict_to_dataset(result)
+    return result
 
 
-def _load_and_concat(paths: tuple[str, ...]) -> Dataset:
-    datasets_list = [_load_single(p) for p in paths]
+def _load_and_concat(paths: tuple[str, ...], *, split: str | None = None) -> Dataset:
+    datasets_list = [_load_single(p, split=split) for p in paths]
     if len(datasets_list) == 1:
         return datasets_list[0]
     return concatenate_datasets(datasets_list)
@@ -76,7 +94,8 @@ def cli():
 @click.argument("dataset_paths", nargs=-1, required=True)
 @click.option("--min-duration", type=float, default=None, help="Exclude samples shorter than this duration (seconds).")
 @click.option("--max-duration", type=float, default=None, help="Exclude samples longer than this duration (seconds).")
-def analyse(dataset_paths: tuple[str, ...], min_duration: float | None, max_duration: float | None):
+@click.option("--split", "split_name", default=None, help="Dataset split to use (e.g. train, test). If omitted, all splits are merged.")
+def analyse(dataset_paths: tuple[str, ...], min_duration: float | None, max_duration: float | None, split_name: str | None):
     """Show sample count, duration histogram, and min/max/mean duration."""
     try:
         import matplotlib
@@ -90,7 +109,7 @@ def analyse(dataset_paths: tuple[str, ...], min_duration: float | None, max_dura
         )
         sys.exit(1)
 
-    ds = _load_and_concat(dataset_paths)
+    ds = _load_and_concat(dataset_paths, split=split_name)
 
     click.echo("Extracting durations …")
     raw_durations = ds["duration"]
@@ -156,13 +175,14 @@ def analyse(dataset_paths: tuple[str, ...], min_duration: float | None, max_dura
     type=click.Path(path_type=Path),
     help="Destination directory for the merged dataset.",
 )
-def merge(dataset_paths: tuple[str, ...], output_path: Path):
+@click.option("--split", "split_name", default=None, help="Dataset split to use (e.g. train, test). If omitted, all splits are merged.")
+def merge(dataset_paths: tuple[str, ...], output_path: Path, split_name: str | None):
     """Concatenate several datasets into one and save to disk."""
     if len(dataset_paths) < 2:
         click.echo("Error: merge requires at least two dataset paths.", err=True)
         sys.exit(1)
 
-    ds = _load_and_concat(dataset_paths)
+    ds = _load_and_concat(dataset_paths, split=split_name)
     click.echo(f"Merged dataset: {len(ds)} samples.")
 
     output_path = output_path.resolve()
@@ -188,14 +208,16 @@ def merge(dataset_paths: tuple[str, ...], output_path: Path):
     "--full", is_flag=True, default=False,
     help="Copy audio samples and voice prompts to the output directory.",
 )
+@click.option("--split", "split_name", default=None, help="Dataset split to export (e.g. train, test). If omitted, all splits are merged.")
 def export_cmd(
     dataset_paths: tuple[str, ...],
     output_path: Path,
     jsonl_name: str,
     full: bool,
+    split_name: str | None,
 ):
     """Export a dataset to JSONL format."""
-    ds = _load_and_concat(dataset_paths)
+    ds = _load_and_concat(dataset_paths, split=split_name)
 
     output_path = output_path.resolve()
     output_path.mkdir(parents=True, exist_ok=True)
