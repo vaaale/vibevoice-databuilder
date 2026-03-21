@@ -91,7 +91,8 @@ def _write_audio(audio, dst: Path) -> None:
 
     *audio* can be:
     - a path string – the file is copied directly,
-    - a ``{path, bytes}`` dict from ``Audio(decode=False)`` – copied from path,
+    - a ``{path, bytes}`` dict from ``Audio(decode=False)`` – written from
+      embedded bytes or copied from the referenced path,
     - a fully decoded HF Audio dict with ``array`` / ``sampling_rate`` keys.
     """
     if isinstance(audio, str):
@@ -101,13 +102,21 @@ def _write_audio(audio, dst: Path) -> None:
         return
     if not isinstance(audio, dict):
         return
-    # decode=False dicts have {"path": ..., "bytes": ...} without array/sr
+
+    # decode=False dicts: {"path": str|None, "bytes": bytes|None}
+    raw_bytes = audio.get("bytes")
+    if raw_bytes is not None:
+        dst.write_bytes(raw_bytes)
+        return
+
     path = audio.get("path")
     if path and "array" not in audio:
         src = Path(path)
         if src.is_file():
             shutil.copy2(str(src), str(dst))
         return
+
+    # Fully decoded Audio dict with array + sampling_rate
     import soundfile as sf
 
     arr = audio.get("array")
