@@ -9,6 +9,45 @@ VOICE_PROMPT_MIN_DURATION = 3.0
 VOICE_PROMPT_MAX_DURATION = 15.0
 
 
+class SpeakerPromptCache:
+    """Rolling cache of the last *max_size* voice prompt paths per speaker.
+
+    Call :meth:`add` as you process records so that later records can
+    draw from prompts seen earlier.  :meth:`select` picks a random
+    candidate while respecting an optional exclusion set.
+    """
+
+    def __init__(self, max_size: int = 50) -> None:
+        self._max_size = max_size
+        self._cache: Dict[str, List[Path]] = {}
+
+    def add(self, speaker_id: str, path: str | Path) -> None:
+        """Append *path* to the cache for *speaker_id*."""
+        p = Path(path) if isinstance(path, str) else path
+        bucket = self._cache.setdefault(speaker_id, [])
+        bucket.append(p)
+        if len(bucket) > self._max_size:
+            del bucket[:-self._max_size]
+
+    def select(
+        self,
+        speaker_id: str,
+        *,
+        exclude: set[str] | None = None,
+    ) -> str | None:
+        """Pick a random cached prompt for *speaker_id*.
+
+        Returns a resolved path string, or ``None`` when no candidate
+        is available after filtering out *exclude* paths.
+        """
+        exclude_set = exclude or set()
+        candidates = self._cache.get(speaker_id, [])
+        available = [p for p in candidates if str(p) not in exclude_set]
+        if not available:
+            return None
+        return str(random.choice(available).resolve())
+
+
 def build_speaker_prompt_index(
     candidates: List[dict],
     *,

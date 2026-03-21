@@ -17,7 +17,13 @@ import torchaudio.transforms as T
 from datasets import Audio, Dataset, DatasetDict, Sequence as HFSequence
 from tqdm.auto import tqdm
 
-from databuilder.voice_prompts import build_speaker_prompt_index, select_voice_prompts
+from databuilder.voice_prompts import (
+    VOICE_PROMPT_MIN_DURATION,
+    VOICE_PROMPT_MAX_DURATION,
+    SpeakerPromptCache,
+    build_speaker_prompt_index,
+    select_voice_prompts,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -481,40 +487,36 @@ def main(
     # ── Voice prompts for single-speaker records ─────────────────────
 
     click.echo("Assigning voice prompts to single-speaker records …")
-    single_candidates = []
-    for r in results:
-        if r["num_speakers"] != 1:
-            continue
-        speakers_data = json.loads(r["speakers"])
-        if not speakers_data:
-            continue
-        duration = r.get("duration")
-        if duration is None:
-            continue
-        single_candidates.append({
-            "speaker_id": speakers_data[0]["speaker_id"],
-            "path": r["audio"],
-            "duration": duration,
-        })
-
-    single_prompt_index = build_speaker_prompt_index(single_candidates)
+    cache = SpeakerPromptCache(max_size=50)
+    n_single = 0
     n_assigned = 0
+
     for r in results:
         if r["num_speakers"] != 1:
             continue
+        n_single += 1
         speakers_data = json.loads(r["speakers"])
         if not speakers_data:
             continue
         speaker_id = speakers_data[0]["speaker_id"]
-        prompts = select_voice_prompts(
-            [speaker_id],
-            single_prompt_index,
-            exclude={r["audio"]},
-        )
-        if prompts:
-            r["voice_prompts"] = prompts
+        audio_path = r["audio"]
+        duration = r.get("duration")
+
+        # Populate cache with clips whose duration is suitable
+        if duration is not None and VOICE_PROMPT_MIN_DURATION <= float(duration) <= VOICE_PROMPT_MAX_DURATION:
+            cache.add(speaker_id, audio_path)
+
+        # Try to pick a different clip from the same speaker
+        prompt = cache.select(speaker_id, exclude={audio_path})
+        if prompt:
+            r["voice_prompts"] = [prompt]
             n_assigned += 1
-    click.echo(f"  Assigned voice prompts to {n_assigned}/{sum(1 for r in results if r['num_speakers'] == 1)} single-speaker records")
+        else:
+            # Self-fallback: use the sample's own audio as the prompt
+            r["voice_prompts"] = [audio_path]
+            n_assigned += 1
+
+    click.echo(f"  Assigned voice prompts to {n_assigned}/{n_single} single-speaker records")
 
     # ── Phase 7: Build DatasetDict ────────────────────────────────────
 
