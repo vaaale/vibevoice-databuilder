@@ -14,8 +14,10 @@ import click
 import torch
 import torchaudio
 import torchaudio.transforms as T
-from datasets import Audio, Dataset, DatasetDict
+from datasets import Audio, Dataset, DatasetDict, Sequence as HFSequence
 from tqdm.auto import tqdm
+
+from databuilder.voice_prompts import build_speaker_prompt_index, select_voice_prompts
 
 logging.basicConfig(
     level=logging.INFO,
@@ -191,11 +193,17 @@ def _diarize_and_cut_segments(
 def _assemble_speaker_text(
     segments: List[tuple[Path, str]],
     transcripts: Dict[Path, str],
-) -> str:
-    """Build Speaker-prefixed text from diarized segments and their transcripts."""
+) -> tuple[str, List[str]]:
+    """Build Speaker-prefixed text from diarized segments and their transcripts.
+
+    Returns ``(assembled_text, ordered_speaker_ids)`` where
+    *ordered_speaker_ids* lists each canonical speaker id in the order it
+    first appears in the text.
+    """
     speaker_map: dict[str, int] = {}
     next_idx = 0
     parts: List[str] = []
+    ordered_speakers: List[str] = []
 
     for seg_path, speaker_id in segments:
         text = transcripts.get(seg_path, "").strip()
@@ -204,11 +212,12 @@ def _assemble_speaker_text(
         if speaker_id not in speaker_map:
             speaker_map[speaker_id] = next_idx
             next_idx += 1
+            ordered_speakers.append(speaker_id)
         idx = speaker_map[speaker_id]
         text = normalize_text(text)
         parts.append(f"Speaker {idx}: {text}")
 
-    return "\n".join(parts)
+    return "\n".join(parts), ordered_speakers
 
 
 # ── Main CLI ──────────────────────────────────────────────────────────────
@@ -351,6 +360,7 @@ def main(
             "num_speakers": rec["num_speakers"],
             "speakers": json.dumps(rec["speakers"], ensure_ascii=False),
             "split": rec["split"],
+            "voice_prompts": [],
         }
 
     results: List[dict] = []
@@ -422,9 +432,29 @@ def main(
 
             segs = record_segments.get(idx)
             if segs:
-                text = _assemble_speaker_text(segs, all_transcripts)
+                text, ordered_speakers = _assemble_speaker_text(segs, all_transcripts)
             else:
-                text = ""
+                text, ordered_speakers = "", []
+
+            # ── voice prompts from diarized segments ──────────────
+            voice_prompts: list[str] = []
+            if ordered_speakers and segs:
+                seg_candidates = []
+                for seg_path, speaker_id in segs:
+                    try:
+                        seg_info = torchaudio.info(str(seg_path))
+                        seg_dur = seg_info.num_frames / seg_info.sample_rate
+                    except Exception:
+                        continue
+                    seg_candidates.append({
+                        "speaker_id": speaker_id,
+                        "path": str(seg_path),
+                        "duration": seg_dur,
+                    })
+                if seg_candidates:
+                    prompt_idx = build_speaker_prompt_index(seg_candidates)
+                    prompts = select_voice_prompts(ordered_speakers, prompt_idx)
+                    voice_prompts = prompts if prompts else []
 
             if not text:
                 text = f"Speaker 0: {normalize_text(rec['transcription_text'])}"
@@ -443,9 +473,48 @@ def main(
                 "num_speakers": rec["num_speakers"],
                 "speakers": json.dumps(rec["speakers"], ensure_ascii=False),
                 "split": rec["split"],
+                "voice_prompts": voice_prompts,
             })
 
     click.echo(f"Total processed: {len(results)}")
+
+    # ── Voice prompts for single-speaker records ─────────────────────
+
+    click.echo("Assigning voice prompts to single-speaker records …")
+    single_candidates = []
+    for r in results:
+        if r["num_speakers"] != 1:
+            continue
+        speakers_data = json.loads(r["speakers"])
+        if not speakers_data:
+            continue
+        duration = r.get("duration")
+        if duration is None:
+            continue
+        single_candidates.append({
+            "speaker_id": speakers_data[0]["speaker_id"],
+            "path": r["audio"],
+            "duration": duration,
+        })
+
+    single_prompt_index = build_speaker_prompt_index(single_candidates)
+    n_assigned = 0
+    for r in results:
+        if r["num_speakers"] != 1:
+            continue
+        speakers_data = json.loads(r["speakers"])
+        if not speakers_data:
+            continue
+        speaker_id = speakers_data[0]["speaker_id"]
+        prompts = select_voice_prompts(
+            [speaker_id],
+            single_prompt_index,
+            exclude={r["audio"]},
+        )
+        if prompts:
+            r["voice_prompts"] = prompts
+            n_assigned += 1
+    click.echo(f"  Assigned voice prompts to {n_assigned}/{sum(1 for r in results if r['num_speakers'] == 1)} single-speaker records")
 
     # ── Phase 7: Build DatasetDict ────────────────────────────────────
 
@@ -460,6 +529,7 @@ def main(
         click.echo(f"  Split '{split_name}': {len(items)} samples")
         ds = Dataset.from_list(items)
         ds = ds.cast_column("audio", Audio(sampling_rate=TARGET_SR))
+        ds = ds.cast_column("voice_prompts", HFSequence(Audio(sampling_rate=TARGET_SR)))
         ds_dict[split_name] = ds
 
     dataset_dict = DatasetDict(ds_dict)
