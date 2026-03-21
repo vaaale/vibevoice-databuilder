@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
 import click
-from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
+from datasets import Audio, Dataset, DatasetDict, Sequence as HFSequence, concatenate_datasets, load_dataset, load_from_disk
 from tqdm.auto import tqdm
 
 
@@ -59,9 +60,23 @@ def _display_name(paths: tuple[str, ...]) -> str:
 
 # ── Audio file helpers ────────────────────────────────────────────────────
 
+def _disable_audio_decoding(ds: Dataset) -> Dataset:
+    """Re-cast Audio feature columns with ``decode=False`` so iteration never triggers decoding."""
+    if "audio" in ds.column_names:
+        ds = ds.cast_column("audio", Audio(decode=False))
+    if "voice_prompts" in ds.column_names:
+        ds = ds.cast_column("voice_prompts", HFSequence(Audio(decode=False)))
+    return ds
+
+
 def _audio_filename(audio, idx: int, *, prompt_index: int | None = None) -> str:
     """Extract or generate a .wav filename from a decoded HF Audio dict."""
-    path = audio.get("path") if isinstance(audio, dict) else None
+    if isinstance(audio, str):
+        path = audio
+    elif isinstance(audio, dict):
+        path = audio.get("path")
+    else:
+        path = None
     if path:
         name = Path(path).name
         if name and name != ".":
@@ -72,11 +87,29 @@ def _audio_filename(audio, idx: int, *, prompt_index: int | None = None) -> str:
 
 
 def _write_audio(audio, dst: Path) -> None:
-    """Write a decoded HF Audio dict to a WAV file."""
-    import soundfile as sf
+    """Write audio to *dst*.
 
+    *audio* can be:
+    - a path string – the file is copied directly,
+    - a ``{path, bytes}`` dict from ``Audio(decode=False)`` – copied from path,
+    - a fully decoded HF Audio dict with ``array`` / ``sampling_rate`` keys.
+    """
+    if isinstance(audio, str):
+        src = Path(audio)
+        if src.is_file():
+            shutil.copy2(str(src), str(dst))
+        return
     if not isinstance(audio, dict):
         return
+    # decode=False dicts have {"path": ..., "bytes": ...} without array/sr
+    path = audio.get("path")
+    if path and "array" not in audio:
+        src = Path(path)
+        if src.is_file():
+            shutil.copy2(str(src), str(dst))
+        return
+    import soundfile as sf
+
     arr = audio.get("array")
     sr = audio.get("sampling_rate")
     if arr is not None and sr is not None:
@@ -218,6 +251,7 @@ def export_cmd(
 ):
     """Export a dataset to JSONL format."""
     ds = _load_and_concat(dataset_paths, split=split_name)
+    ds = _disable_audio_decoding(ds)
 
     output_path = output_path.resolve()
     output_path.mkdir(parents=True, exist_ok=True)
