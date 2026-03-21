@@ -25,6 +25,13 @@ Commands:
   enhance sweep INPUT_FILE OUTPUT_DIR [options]
       Parameter sweep on a single audio file.
 
+  export <subcommand> DATASET_PATHS... [options]
+      Export / analyse / merge datasets.
+      Subcommands: analyse, merge, export
+
+  stortinget [options]
+      Build a dataset from the NPSC Stortinget V1.0 corpus.
+
 Environment:
   VIBEVOICE_IMAGE   Docker image name (default: vibevoice-data)
 
@@ -32,6 +39,8 @@ Examples:
   databuilder.sh databuilder /data/raw ./output/dataset --device cuda --batch-size 32
   databuilder.sh enhance batch /data/input --output-dir /data/output --device cuda
   databuilder.sh enhance sweep /data/file.wav --output-dir ./sweep_out --nfe 8,16,32,64
+  databuilder.sh export export /data/dataset --output-path ./export_out --full
+  databuilder.sh stortinget --input-path /data/stortinget --output-path ./stortinget_out --device cuda
 EOF
 }
 
@@ -56,6 +65,8 @@ VALUED_OPTS=(
     --model-id --device --hf-token --speaker-prefix --max-duration
     --max-num-speakers --batch-size --chunk-size --work-dir --output-dir
     --nfe --lambd --tau --uid --gid
+    --output-path --input-path --whisper-model --num-workers
+    --num-audio-workers --limit --min-duration --split --jsonl
 )
 
 is_valued_opt() {
@@ -138,6 +149,79 @@ handle_databuilder() {
 
     # Pass current user's uid/gid so the container can chown output files
     CONTAINER_ARGS+=("--uid" "$(id -u)" "--gid" "$(id -g)")
+}
+
+handle_export() {
+    if [[ $# -eq 0 ]]; then
+        echo "Error: export requires a subcommand (analyse, merge, export)" >&2
+        exit 1
+    fi
+
+    local subcmd="$1"; shift
+    CONTAINER_ARGS+=("$subcmd")
+
+    local -a args=("$@")
+    local i=0
+
+    while [[ $i -lt ${#args[@]} ]]; do
+        local arg="${args[$i]}"
+        if is_valued_opt "$arg" && [[ $((i + 1)) -lt ${#args[@]} ]]; then
+            local val="${args[$((i + 1))]}"
+            if [[ "$arg" == "--output-path" ]]; then
+                add_volume "$val" "$val" "rw"
+                CONTAINER_ARGS+=("$arg" "$val")
+            else
+                CONTAINER_ARGS+=("$arg" "$val")
+            fi
+            i=$((i + 2))
+        elif [[ "$arg" == --* ]]; then
+            CONTAINER_ARGS+=("$arg")
+            i=$((i + 1))
+        else
+            # Positional arg (dataset path) — mount if local
+            if is_local_path "$arg"; then
+                local resolved
+                resolved="$(resolve_path "$arg")"
+                add_volume "$resolved" "$resolved" "ro"
+                CONTAINER_ARGS+=("$resolved")
+            else
+                CONTAINER_ARGS+=("$arg")
+            fi
+            i=$((i + 1))
+        fi
+    done
+}
+
+handle_stortinget() {
+    local -a args=("$@")
+    local i=0
+
+    while [[ $i -lt ${#args[@]} ]]; do
+        local arg="${args[$i]}"
+        if is_valued_opt "$arg" && [[ $((i + 1)) -lt ${#args[@]} ]]; then
+            local val="${args[$((i + 1))]}"
+            case "$arg" in
+                --input-path)
+                    add_volume "$val" "$val" "ro"
+                    CONTAINER_ARGS+=("$arg" "$val")
+                    ;;
+                --output-path|--work-dir)
+                    add_volume "$val" "$val" "rw"
+                    CONTAINER_ARGS+=("$arg" "$val")
+                    ;;
+                *)
+                    CONTAINER_ARGS+=("$arg" "$val")
+                    ;;
+            esac
+            i=$((i + 2))
+        elif [[ "$arg" == --* ]]; then
+            CONTAINER_ARGS+=("$arg")
+            i=$((i + 1))
+        else
+            CONTAINER_ARGS+=("$arg")
+            i=$((i + 1))
+        fi
+    done
 }
 
 handle_enhance() {
@@ -228,6 +312,12 @@ case "$COMMAND" in
         ;;
     enhance)
         handle_enhance "$@"
+        ;;
+    export)
+        handle_export "$@"
+        ;;
+    stortinget)
+        handle_stortinget "$@"
         ;;
     *)
         echo "Error: Unknown command '$COMMAND'" >&2

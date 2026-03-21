@@ -8,6 +8,8 @@ Usage: run.sh <command> [args...]
 Commands:
   databuilder    Run the dataset builder pipeline (Whisper ASR + diarization)
   enhance        Run audio enhancement (batch or sweep mode)
+  export         Export / analyse / merge datasets (subcommands: analyse, merge, export)
+  stortinget     Build a dataset from the NPSC Stortinget V1.0 corpus
   help           Show this help message
 
 Examples:
@@ -19,6 +21,12 @@ Examples:
 
   # Parameter sweep on a single file
   run.sh enhance sweep /data/input/file.wav --output-dir /data/output --nfe 8,16,32,64 --lambd 0.5 --tau 0.5
+
+  # Export a dataset to JSONL
+  run.sh export export /data/dataset --output-path /data/export --full
+
+  # Build Stortinget dataset
+  run.sh stortinget --input-path /data/stortinget --output-path /data/output --device cuda
 
   # Pass --help to any command for full options
   run.sh databuilder --help
@@ -42,6 +50,12 @@ case "$COMMAND" in
         ;;
     enhance)
         exec ./.venv/bin/python -m databuilder.run_enhance_dir "$@"
+        ;;
+    export)
+        exec ./.venv/bin/python -m databuilder.export "$@"
+        ;;
+    stortinget)
+        exec ./.venv/bin/python -m databuilder.stortinget_v1 "$@"
         ;;
     *)
         echo "Error: Unknown command '$COMMAND'" >&2
