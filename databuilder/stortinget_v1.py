@@ -34,9 +34,9 @@ logger = logging.getLogger(__name__)
 # ── Constants ─────────────────────────────────────────────────────────────
 
 TARGET_SR = 24_000
-ENHANCE_NFE = 43
-ENHANCE_LAMBD = 0.9
-ENHANCE_TAU = 0.7
+ENHANCE_NFE_DEFAULT = 32
+ENHANCE_LAMBD_DEFAULT = 0.9
+ENHANCE_TAU_DEFAULT = 0.7
 
 EXCLUDED_FIELDS = frozenset({
     "context_after",
@@ -72,7 +72,7 @@ def normalize_text(text: str) -> str:
 # ── Audio enhancement ─────────────────────────────────────────────────────
 
 
-def _enhance_single(src: Path, dst: Path, device: str) -> bool:
+def _enhance_single(src: Path, dst: Path, device: str, nfe: int = ENHANCE_NFE_DEFAULT, lambd: float = ENHANCE_LAMBD_DEFAULT, tau: float = ENHANCE_TAU_DEFAULT) -> bool:
     """Denoise, enhance, and resample one audio file to TARGET_SR WAV.
 
     Returns True on success.
@@ -88,10 +88,10 @@ def _enhance_single(src: Path, dst: Path, device: str) -> bool:
         dwav, sr = denoise(dwav, sr, device, run_dir="resemble_ai")
         dwav, sr = enhance(
             dwav, sr, device,
-            nfe=ENHANCE_NFE,
+            nfe=nfe,
             solver="midpoint",
-            lambd=ENHANCE_LAMBD,
-            tau=ENHANCE_TAU,
+            lambd=lambd,
+            tau=tau,
         )
 
         if sr != TARGET_SR:
@@ -115,8 +115,13 @@ def _enhance_all(
     file_pairs: List[tuple[Path, Path]],
     device: str,
     batch_size: int = 1,
+    nfe: int = ENHANCE_NFE_DEFAULT,
+    lambd: float = ENHANCE_LAMBD_DEFAULT,
+    tau: float = ENHANCE_TAU_DEFAULT,
 ) -> None:
-    """Enhance audio files in batches, skipping those already done."""
+    """Enhance audio files using GPU-batched inference, skipping those already done."""
+    from resemble_enhance.enhancer.inference import denoise_batch, enhance, enhance_batch
+
     todo = [(s, d) for s, d in file_pairs if not d.exists()]
     done = len(file_pairs) - len(todo)
     logger.info(f"Audio enhancement: {len(todo)} pending, {done} already done")
@@ -124,13 +129,99 @@ def _enhance_all(
         return
 
     batch_size = max(1, batch_size)
-    n_batches = (len(todo) + batch_size - 1) // batch_size
+    file_batch_size = 10
+    n_batches = (len(todo) + file_batch_size - 1) // file_batch_size
+    processed = 0
 
     for batch_idx in range(n_batches):
-        batch = todo[batch_idx * batch_size : (batch_idx + 1) * batch_size]
+        batch = todo[batch_idx * file_batch_size : (batch_idx + 1) * file_batch_size]
         click.echo(f"  Batch {batch_idx + 1}/{n_batches} ({len(batch)} files)")
-        for src, dst in tqdm(batch, desc=f"Batch {batch_idx + 1}", unit="file"):
-            _enhance_single(src, dst, device)
+
+        # ── Load waveforms ────────────────────────────────────
+        dwavs: list[torch.Tensor] = []
+        srs: list[int] = []
+        valid: list[tuple[Path, Path]] = []
+
+        for src, dst in batch:
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=UserWarning)
+                    dwav, sr = torchaudio.load(src)
+                dwavs.append(dwav.mean(dim=0))
+                srs.append(sr)
+                valid.append((src, dst))
+            except Exception:
+                logger.exception(f"Failed to load {src.name}")
+
+        if not dwavs:
+            continue
+
+        # ── Denoise (batched GPU inference) ───────────────────
+        try:
+            denoised = denoise_batch(dwavs, srs, device, run_dir="resemble_ai", batch_size=batch_size)
+            dwavs = [d for d, s in denoised]
+            srs = [s for d, s in denoised]
+        except Exception:
+            logger.exception(f"Batch denoise failed (batch {batch_idx + 1}), falling back to sequential")
+            for src, dst in valid:
+                _enhance_single(src, dst, device, nfe=nfe, lambd=lambd, tau=tau)
+            processed += len(valid)
+            click.echo(f"  Progress: {processed}/{len(todo)} files")
+            continue
+
+        # ── Enhance (batched GPU inference) ───────────────────
+        try:
+            enhanced = enhance_batch(
+                dwavs, srs, device,
+                nfe=nfe,
+                solver="midpoint",
+                lambd=lambd,
+                tau=tau,
+                batch_size=batch_size,
+            )
+        except Exception:
+            logger.exception(f"Batch enhance failed (batch {batch_idx + 1}), falling back to sequential")
+            enhanced = []
+            for dwav, sr_val in zip(dwavs, srs):
+                try:
+                    enhanced.append(enhance(dwav, sr_val, device, nfe=nfe, solver="midpoint", lambd=lambd, tau=tau))
+                except Exception:
+                    enhanced.append(None)
+            for (src, dst), result in zip(valid, enhanced):
+                if result is None:
+                    logger.error(f"Sequential enhance also failed for {src.name}")
+                    continue
+                hwav, sr = result
+                try:
+                    if sr != TARGET_SR:
+                        hwav = T.Resample(sr, TARGET_SR, dtype=hwav.dtype)(hwav)
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings("ignore", category=UserWarning)
+                        torchaudio.save(str(dst), hwav.unsqueeze(0), sample_rate=TARGET_SR)
+                except Exception:
+                    logger.exception(f"Failed to save {dst.name}")
+            processed += len(valid)
+            click.echo(f"  Progress: {processed}/{len(todo)} files")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            continue
+
+        # ── Resample & save ───────────────────────────────────
+        for (src, dst), (hwav, sr) in zip(valid, enhanced):
+            try:
+                if sr != TARGET_SR:
+                    hwav = T.Resample(sr, TARGET_SR, dtype=hwav.dtype)(hwav)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=UserWarning)
+                    torchaudio.save(str(dst), hwav.unsqueeze(0), sample_rate=TARGET_SR)
+            except Exception:
+                logger.exception(f"Failed to save {dst.name}")
+
+        processed += len(valid)
+        click.echo(f"  Progress: {processed}/{len(todo)} files")
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -271,8 +362,11 @@ def _assemble_speaker_text(
     type=int,
     default=32,
     show_default=True,
-    help="Number of files per audio enhancement batch.",
+    help="Number of chunks per GPU inference batch for audio enhancement.",
 )
+@click.option("--nfe", type=int, default=ENHANCE_NFE_DEFAULT, show_default=True, help="Number of function evaluations for enhancement.")
+@click.option("--lambd", type=float, default=ENHANCE_LAMBD_DEFAULT, show_default=True, help="Lambda parameter for enhancement.")
+@click.option("--tau", type=float, default=ENHANCE_TAU_DEFAULT, show_default=True, help="Tau parameter for enhancement.")
 @click.option(
     "--limit",
     type=int,
@@ -288,6 +382,9 @@ def main(
     batch_size: int,
     num_workers: int,
     batch_size_enhance: int,
+    nfe: int,
+    lambd: float,
+    tau: float,
     limit: int | None,
 ) -> None:
     """Build a HuggingFace DatasetDict from the NPSC Stortinget V1.0 corpus."""
@@ -335,7 +432,7 @@ def main(
         file_pairs.append((src, dst))
 
     click.echo(f"  {len(file_pairs)} unique audio files")
-    _enhance_all(file_pairs, device, batch_size=batch_size_enhance)
+    _enhance_all(file_pairs, device, batch_size=batch_size_enhance, nfe=nfe, lambd=lambd, tau=tau)
 
     # ── Phase 3: Single-speaker records (CPU-parallel) ────────────────
 
