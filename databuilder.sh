@@ -66,7 +66,7 @@ VALUED_OPTS=(
     --max-num-speakers --batch-size --chunk-size --work-dir --output-dir
     --nfe --lambd --tau --uid --gid
     --output-path --input-path --whisper-model --num-workers
-    --num-audio-workers --limit --min-duration --split --jsonl
+    --num-audio-workers --batch-size-enhance --limit --min-duration --split --jsonl
 )
 
 is_valued_opt() {

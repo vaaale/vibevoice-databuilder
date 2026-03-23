@@ -114,29 +114,25 @@ def _enhance_single(src: Path, dst: Path, device: str) -> bool:
 def _enhance_all(
     file_pairs: List[tuple[Path, Path]],
     device: str,
-    num_workers: int,
+    batch_size: int = 1,
 ) -> None:
-    """Enhance audio files, skipping those already done."""
+    """Enhance audio files in batches, skipping those already done."""
     todo = [(s, d) for s, d in file_pairs if not d.exists()]
     done = len(file_pairs) - len(todo)
     logger.info(f"Audio enhancement: {len(todo)} pending, {done} already done")
     if not todo:
         return
 
-    if num_workers <= 1:
-        for src, dst in tqdm(todo, desc="Enhancing audio", unit="file"):
+    batch_size = max(1, batch_size)
+    n_batches = (len(todo) + batch_size - 1) // batch_size
+
+    for batch_idx in range(n_batches):
+        batch = todo[batch_idx * batch_size : (batch_idx + 1) * batch_size]
+        click.echo(f"  Batch {batch_idx + 1}/{n_batches} ({len(batch)} files)")
+        for src, dst in tqdm(batch, desc=f"Batch {batch_idx + 1}", unit="file"):
             _enhance_single(src, dst, device)
-    else:
-        with ThreadPoolExecutor(max_workers=num_workers) as pool:
-            futs = {
-                pool.submit(_enhance_single, s, d, device): s
-                for s, d in todo
-            }
-            for f in tqdm(
-                as_completed(futs), total=len(futs),
-                desc="Enhancing audio", unit="file",
-            ):
-                f.result()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 # ── Multi-speaker diarization helpers ─────────────────────────────────────
@@ -271,11 +267,11 @@ def _assemble_speaker_text(
     help="Workers for CPU-bound tasks.",
 )
 @click.option(
-    "--num-audio-workers",
+    "--batch-size-enhance",
     type=int,
-    default=1,
+    default=32,
     show_default=True,
-    help="Concurrent audio enhancement workers.",
+    help="Number of files per audio enhancement batch.",
 )
 @click.option(
     "--limit",
@@ -291,7 +287,7 @@ def main(
     whisper_model: str,
     batch_size: int,
     num_workers: int,
-    num_audio_workers: int,
+    batch_size_enhance: int,
     limit: int | None,
 ) -> None:
     """Build a HuggingFace DatasetDict from the NPSC Stortinget V1.0 corpus."""
@@ -339,7 +335,7 @@ def main(
         file_pairs.append((src, dst))
 
     click.echo(f"  {len(file_pairs)} unique audio files")
-    _enhance_all(file_pairs, device, num_audio_workers)
+    _enhance_all(file_pairs, device, batch_size=batch_size_enhance)
 
     # ── Phase 3: Single-speaker records (CPU-parallel) ────────────────
 
