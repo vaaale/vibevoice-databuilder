@@ -252,7 +252,7 @@ def _assemble_speaker_text(
 @click.option("--device", default=None, help="Torch device (default: auto-detect).")
 @click.option(
     "--whisper-model",
-    default="NbAiLab/nb-whisper-large",
+    default="openai/whisper-large-v3",
     show_default=True,
     help="Whisper model for multi-speaker transcription.",
 )
